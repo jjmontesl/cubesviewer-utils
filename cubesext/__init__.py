@@ -1,5 +1,5 @@
 
-from .cubesutils import pandas2cubes, cubesviewer_jupyter
+from .cubesutils import pandas2cubes, sql2cubes, cubesviewer_jupyter, cubes_serve
 
 __author__ = 'Jose Juan Montes [@jjmontesl]'
 __description__ = 'Integration of Cubes and CubesViewer with Pandas, Jupyter Notebook and Django.'

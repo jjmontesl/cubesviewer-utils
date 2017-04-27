@@ -3,13 +3,14 @@
 from sqlalchemy.engine import create_engine
 from cubes.workspace import Workspace
 import tempfile
-import cubes
 import configparser
 import sqlalchemy
 import cubetl
 from cubetl import olap, cubes, sql
 from cubetl.core.bootstrap import Bootstrap
+from cubes import server
 import slugify
+import os
 
 
 def pandas2cubes(dataframe):
@@ -17,7 +18,7 @@ def pandas2cubes(dataframe):
     """
     # Load dataframe to in-memory sqlite
 
-    (tmpfile, db_path) = tempfile.mkstemp(suffix='.sqlite3', prefix='pandacubes')
+    (tmpfile, db_path) = tempfile.mkstemp(suffix='.sqlite3', prefix='cubesext-db-')
     db_url = 'sqlite:///' + db_path
 
     engine = create_engine(db_url)
@@ -27,7 +28,10 @@ def pandas2cubes(dataframe):
     return sql2cubes(engine)
 
 
-def sql2cubes(engine, tables=None):
+def sql2cubes(engine, tables=None, debug=False):
+
+    exclude_columns = ['key']
+    force_dimensions = ['year']
 
     metadata = sqlalchemy.MetaData()
     metadata.reflect(engine)
@@ -38,33 +42,112 @@ def sql2cubes(engine, tables=None):
 
     # Create Cubetl context
     bootstrap = Bootstrap()
-    ctx = bootstrap.init()
+    ctx = bootstrap.init(debug=debug)
     ctx.debug = True
 
-    olapmappers = []
+    olapmappers = {}  # Indexed by table name
+    factdimensions = {}  # Indexed by table_name
+    facts = {}  # Indexed by table name
+
+    def coltype(dbcol):
+        if str(dbcol.type) in ("FLOAT", "REAL", "DECIMAL"):
+            return "Float"
+        elif str(dbcol.type) in ("INTEGER", "BIGINT"):
+            return "Integer"
+        elif str(dbcol.type) in ("BOOLEAN", "TEXT") or str(dbcol.type).startswith("VARCHAR"):
+            return "String"
+        return None
 
     for dbtable in metadata.sorted_tables:
 
-        #print("+ Table: %s" % dbtable.name)
+        if dbtable.name in ('sqlite_sequence'):
+            continue
+
+        print("+ Table: %s" % dbtable.name)
 
         tablename = slugify.slugify(dbtable.name, separator="_")
 
         # Define fact
         fact = olap.Fact()
         fact.id = "cubesutils.%s.fact" % (tablename)
+        fact.name = slugify.slugify(dbtable.name, separator="_")
         fact.label = dbtable.name
         fact.dimensions = []
         fact.measures = []
         fact.attributes = []
 
+        facts[dbtable.name] = fact
+
         olapmapper = olap.OlapMapper()
         olapmapper.id = "cubesutils.%s.olapmapper" % (tablename)
         olapmapper.mappers = []
+        olapmapper.include = []
+
+        factmappings = []
 
         for dbcol in dbtable.columns:
-            #print("+-- Column: %s [type=%s, null=%s, pk=%s, fk=%s]" % (dbcol.name, dbcol.type, dbcol.nullable, dbcol.primary_key, dbcol.foreign_keys))
 
-            if str(dbcol.type) == "TEXT":
+            if dbcol.name in exclude_columns:
+                continue
+
+            print("+-- Column: %s [type=%s, null=%s, pk=%s, fk=%s]" % (dbcol.name, dbcol.type, dbcol.nullable, dbcol.primary_key, dbcol.foreign_keys))
+
+            if dbcol.primary_key:
+                if (str(dbcol.type) == "INTEGER"):
+                    factmappings.append( { 'name': slugify.slugify(dbcol.name, separator="_"),
+                                           'pk': True,
+                                           'type': 'Integer' } )
+                elif str(dbcol.type) == "TEXT" or str(dbcol.type).startswith("VARCHAR"):
+                    factmappings.append( { 'name': slugify.slugify(dbcol.name, separator="_"),
+                                           'pk': True,
+                                           'type': 'String' } )
+                else:
+                    raise Exception("Unknown column type (%s) for primary key column: %s" % (dbcol.type, dbcol.name))
+
+            elif dbcol.foreign_keys and len(dbcol.foreign_keys) > 0:
+
+                if len(dbcol.foreign_keys) > 1:
+                    raise Exception("Multiple foreign keys found for column: %s" % (dbcol.name))
+
+                related_fact = list(dbcol.foreign_keys)[0].column.table.name
+
+                if related_fact == dbtable.name:
+                    continue
+
+                factdimension = None
+                if related_fact in factdimensions:
+                    factdimension = factdimensions[related_fact]
+                else:
+                    factdimension = olap.FactDimension()
+                    factdimension.id = "cubesutils.%s.dim.%s" % (tablename, slugify.slugify(related_fact, separator="_"))
+                    factdimension.name = slugify.slugify(related_fact, separator="_")
+                    factdimension.label = related_fact
+                    factdimension.fact = facts[related_fact]
+                    cubetl.container.add_component(factdimension)
+
+                    factdimensions[related_fact] = factdimension
+
+                # Create an alias
+                aliasdimension = olap.AliasDimension()
+                aliasdimension.dimension = factdimension
+                aliasdimension.id = "cubesutils.%s.dim.%s.%s" % (tablename, slugify.slugify(related_fact, separator="_"), slugify.slugify(dbcol.name, separator="_"))
+                aliasdimension.name = slugify.slugify(dbcol.name, separator="_").replace("_id", "")
+                aliasdimension.label = slugify.slugify(dbcol.name, separator="_").replace("_id", "")
+                cubetl.container.add_component(aliasdimension)
+
+                fact.dimensions.append(aliasdimension)
+
+                mapper = olap.sql.FactDimensionMapper()
+                mapper.entity = aliasdimension
+                mapper.mappings = [{ 'name': slugify.slugify(dbcol.name, separator="_").replace("_id", ""),
+                                     'column': dbcol.name,
+                                     'pk': True
+                                  }]
+                olapmapper.include.append(olapmappers[related_fact])
+                olapmapper.mappers.append(mapper)
+
+            elif (dbcol.name in force_dimensions) or coltype(dbcol) == "String":
+
                 # Create dimension
                 dimension = olap.Dimension()
                 dimension.id = "cubesutils.%s.dim.%s" % (tablename, slugify.slugify(dbcol.name, separator="_"))
@@ -73,7 +156,7 @@ def sql2cubes(engine, tables=None):
                 dimension.attributes = [{
                     "pk": True,
                     "name": slugify.slugify(dbcol.name, separator="_"),
-                    "type": "String"
+                    "type": coltype(dbcol)
                     }]
 
                 cubetl.container.add_component(dimension)
@@ -87,12 +170,28 @@ def sql2cubes(engine, tables=None):
                 mapper.mappings = [{ 'name': slugify.slugify(dbcol.name, separator="_") }]
                 olapmapper.mappers.append(mapper)
 
+            elif str(dbcol.type) in ("FLOAT", "REAL", "DECIMAL", "INTEGER"):
+
+                measure = {
+                    "name": dbcol.name,
+                    "label": dbcol.name,
+                    "type": "Integer" if str(dbcol.type) in ["INTEGER"] else "Float"
+                }
+                fact.measures.append(measure)
+
+            else:
+
+                print("Unknown column: %s" % (dbcol.name))
+
 
         mapper = olap.sql.FactMapper()
         mapper.entity = fact
         mapper.table = dbtable.name
         mapper.connection = connection
-        mapper.mappings = [ { 'name': 'index', 'pk': True, 'type': 'Integer' } ]
+        if len(factmappings) > 0:
+            mapper.mappings = factmappings
+        else:
+            mapper.mappings = [ { 'name': 'index', 'pk': True, 'type': 'Integer' } ]
         olapmapper.mappers.append(mapper)
 
         #  mappings:
@@ -102,36 +201,46 @@ def sql2cubes(engine, tables=None):
         #    value: ${ int(m["id"]) }
 
         cubetl.container.add_component(fact)
-        olapmappers.append(olapmapper)
+        olapmappers[dbtable.name] = olapmapper
 
     # Export process
     modelwriter = cubes.Cubes10ModelWriter()
     modelwriter.id = "cubesutils.export-cubes"
     modelwriter.olapmapper = olap.OlapMapper()
-    modelwriter.olapmapper.include = olapmappers
+    modelwriter.olapmapper.include = [i for i in olapmappers.values()]
+
+    #modelwriter.olapmapper.mappers = [ ]
+    #for om in olapmappers:
+    #    for m in om.mappers:
+    #        modelwriter.olapmapper.mappers.append(m)
+    #        print(m.entity)
     cubetl.container.add_component(modelwriter)
 
     # Launch process
     ctx.start_node = "cubesutils.export-cubes"
-    bootstrap.run(ctx)
+    result = bootstrap.run(ctx)
+    model_json = result["cubesmodel_json"]
 
+    # Write model
+    (tmpfile, model_path) = tempfile.mkstemp(suffix='.json', prefix='cubesext-model-')
+    os.write(tmpfile, model_json.encode("utf-8"))
+    os.close(tmpfile)
 
-    # Create cubes workspace
     #workspace = Workspace()
     #workspace.register_default_store("sql", url=connection.url)
 
     # Load model
     #workspace.import_model("model.json")
 
-    #return workspace
+    return (engine.url, model_path)
 
 
 
-def cubes_serve(workspace):
+def cubes_serve(db_url, model_path, host="localhost", port=5000, allow_cors_origin="*", debug=False, json_record_limit=5000):
     """
     """
 
-    config = configparser.RawConfigParser()
+    config = configparser.ConfigParser()
 
     # When adding sections or items, add them in the reverse order of
     # how you want them to be displayed in the actual file.
@@ -140,15 +249,22 @@ def cubes_serve(workspace):
     # non-string values to keys internally, but will receive an error
     # when attempting to write to a file or when you get it in non-raw
     # mode. SafeConfigParser does not allow such assignments to take place.
-    #config.add_section('Section1')
-    #config.set('Section1', 'an_int', '15')
-    #config.set('Section1', 'a_bool', 'true')
-    #config.set('Section1', 'a_float', '3.1415')
-    #config.set('Section1', 'baz', 'fun')
-    #config.set('Section1', 'bar', 'Python')
-    #config.set('Section1', 'foo', '%(bar)s is %(baz)s!')
 
-    #cubes.server.run_server(config, debug=False)
+    config.add_section('server')
+    config.set('server', 'host', host)
+    config.set('server', 'port', str(port))
+    config.set('server', 'json_record_limit', str(json_record_limit))
+    config.set('server', 'processes', '2')
+    config.set('server', 'allow_cors_origin', allow_cors_origin)
+
+    config.add_section('store')
+    config.set('store', 'type', 'sql')
+    config.set('store', 'url', str(db_url))
+
+    config.add_section('models')
+    config.set('models', 'main', model_path)
+
+    server.run_server(config, debug=debug)
 
 
 def cubesviewer_serve(host="localhost", port="8085"):
@@ -200,21 +316,19 @@ def cubesviewer_jupyter():
 
               console.debug("Initializing CubesViewer cell in Jupyter Notebook.");
 
-              var cubesUrl = "http://cubesdemo.cubesviewer.com";
+              var cubesUrl = "http://localhost:5000";
 
               // Initialize CubesViewer system
               cubesviewer.init({
-                  cubesUrl: cubesUrl,
-                  gaTrackEvents: true
+                  cubesUrl: cubesUrl
               });
-
-              // Sample serialized view (Based on cubes-examples project data)
-              var serializedView =
-                  '{"cubename":"webshop_sales","controlsHidden":false,"name":"Cube Webshop / Sales","mode":"chart","drilldown":["country:continent"],"cuts":[],"datefilters":[],"rangefilters":[],"xaxis":"date_sale@daily:month","yaxis":"price_total_sum","charttype":"lines-stacked","columnHide":{},"columnWidths":{},"columnSort":{},"chart-barsvertical-stacked":true,"chart-disabledseries":{"key":"product@product:product_category","disabled":{"Books":false,"Sports":false,"Various":false,"Videos":false}}}';
 
               // Add views
               cubesviewer.apply(function() {
-                  view1 = cubesviewer.createView('#cv_embedded_01', "cube", serializedView);
+                  //view1 = cubesviewer.createView('#cv_embedded_01', "cube", serializedViewOrObject);
+                  var serializedView = {"mode":"summary", "cubename":"estat_earn_ses", "name": "Sample View"};
+
+                  view1 = cubesviewer.createView('#cv_embedded_01', "pandacube", serializedView);
               });
 
           });
