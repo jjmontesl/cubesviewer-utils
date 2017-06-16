@@ -3,15 +3,20 @@
 from sqlalchemy.engine import create_engine
 from cubes.workspace import Workspace
 import tempfile
-import configparser
 import sqlalchemy
 import cubetl
 from cubetl import olap, cubes, sql
 from cubetl.core.bootstrap import Bootstrap
+from cubetl.core import cubetlconfig
 from cubes import server
 import slugify
 import os
+import sys
 
+if sys.version_info >= (3, 0):
+    from configparser import ConfigParser
+else:
+    from ConfigParser import SafeConfigParser as ConfigParser
 
 def pandas2cubes(dataframe):
     """
@@ -28,10 +33,10 @@ def pandas2cubes(dataframe):
     return sql2cubes(engine)
 
 
-def sql2cubes(engine, tables=None, model_path=None, debug=False):
+def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False):
 
     exclude_columns = ['key']
-    force_dimensions = ['year']
+    force_dimensions = dimensions
 
     metadata = sqlalchemy.MetaData()
     metadata.reflect(engine)
@@ -44,6 +49,10 @@ def sql2cubes(engine, tables=None, model_path=None, debug=False):
     bootstrap = Bootstrap()
     ctx = bootstrap.init(debug=debug)
     ctx.debug = True
+
+    # Load yaml library definitions that are dependencies
+    cubetlconfig.load_config(ctx, os.path.dirname(__file__) + "/cubetl-datetime.yaml")
+
 
     olapmappers = {}  # Indexed by table name
     factdimensions = {}  # Indexed by table_name
@@ -112,6 +121,8 @@ def sql2cubes(engine, tables=None, model_path=None, debug=False):
                 related_fact = list(dbcol.foreign_keys)[0].column.table.name
 
                 if related_fact == dbtable.name:
+                    # Reference to self
+                    # TODO: This does not account for circular dependencies across other entities
                     continue
 
                 factdimension = None
@@ -180,9 +191,33 @@ def sql2cubes(engine, tables=None, model_path=None, debug=False):
                 }
                 fact.measures.append(measure)
 
+            elif str(dbcol.type) in ("DATETIME"):
+
+                factdimension = cubetl.container.get_component_by_id("cubetl.datetime.date")
+
+                # Create an alias to a datetime dimension
+                aliasdimension = olap.AliasDimension()
+                aliasdimension.dimension = factdimension
+                aliasdimension.id = "cubesutils.%s.dim.%s.%s" % (tablename, "datetime", slugify.slugify(dbcol.name, separator="_"))
+                aliasdimension.name = slugify.slugify(dbcol.name, separator="_").replace("_id", "")
+                aliasdimension.label = slugify.slugify(dbcol.name, separator="_").replace("_id", "")
+                cubetl.container.add_component(aliasdimension)
+
+                fact.dimensions.append(aliasdimension)
+
+                mapper = olap.sql.EmbeddedDimensionMapper()
+                mapper.entity = aliasdimension
+                mapper.mappings = [{ 'name': 'year', 'column': 'year(%s)' % dbcol.name },
+                                   { 'name': 'quarter', 'column': 'quarter(%s)' % dbcol.name },
+                                   { 'name': 'month', 'column': 'month(%s)' % dbcol.name },
+                                   { 'name': 'week', 'column': 'week(%s)' % dbcol.name },
+                                   { 'name': 'day', 'column': 'day(%s)' % dbcol.name }]
+                #olapmapper.include.append(olapmappers[related_fact])
+                olapmapper.mappers.append(mapper)
+
             else:
 
-                print("Unknown column: %s" % (dbcol.name))
+                print("    Cannot map column '%s' (type: %s)" % (dbcol.name, dbcol.type))
 
 
         mapper = olap.sql.FactMapper()
@@ -245,7 +280,7 @@ def cubes_serve(db_url, model_path, host="localhost", port=5000, allow_cors_orig
     """
     """
 
-    config = configparser.ConfigParser()
+    config = ConfigParser()
 
     # When adding sections or items, add them in the reverse order of
     # how you want them to be displayed in the actual file.
@@ -259,7 +294,8 @@ def cubes_serve(db_url, model_path, host="localhost", port=5000, allow_cors_orig
     config.set('server', 'host', host)
     config.set('server', 'port', str(port))
     config.set('server', 'json_record_limit', str(json_record_limit))
-    config.set('server', 'processes', '2')
+    config.set('server', 'processes', '1')
+    config.set('server', 'use_reloader', "False")
     config.set('server', 'allow_cors_origin', allow_cors_origin)
 
     config.add_section('store')
