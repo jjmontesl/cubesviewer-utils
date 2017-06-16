@@ -28,7 +28,7 @@ def pandas2cubes(dataframe):
     return sql2cubes(engine)
 
 
-def sql2cubes(engine, tables=None, debug=False):
+def sql2cubes(engine, tables=None, model_path=None, debug=False):
 
     exclude_columns = ['key']
     force_dimensions = ['year']
@@ -151,11 +151,11 @@ def sql2cubes(engine, tables=None, debug=False):
                 # Create dimension
                 dimension = olap.Dimension()
                 dimension.id = "cubesutils.%s.dim.%s" % (tablename, slugify.slugify(dbcol.name, separator="_"))
-                dimension.name = slugify.slugify(dbcol.name, separator="_")
+                dimension.name = slugify.slugify(dbtable.name, separator="_") + "_" + slugify.slugify(dbcol.name, separator="_")
                 dimension.label = dbcol.name
                 dimension.attributes = [{
                     "pk": True,
-                    "name": slugify.slugify(dbcol.name, separator="_"),
+                    "name": slugify.slugify(dbtable.name, separator="_") + "_" + slugify.slugify(dbcol.name, separator="_"),
                     "type": coltype(dbcol)
                     }]
 
@@ -167,7 +167,8 @@ def sql2cubes(engine, tables=None, debug=False):
                 #mapper.table = dbtable.name
                 #mapper.connection = connection
                 #mapper.lookup_cols = dbcol.name
-                mapper.mappings = [{ 'name': slugify.slugify(dbcol.name, separator="_") }]
+                mapper.mappings = [{ 'name': slugify.slugify(dbtable.name, separator="_") + "_" + slugify.slugify(dbcol.name, separator="_"),
+                                     'column': slugify.slugify(dbcol.name, separator="_") }]
                 olapmapper.mappers.append(mapper)
 
             elif str(dbcol.type) in ("FLOAT", "REAL", "DECIMAL", "INTEGER"):
@@ -222,9 +223,13 @@ def sql2cubes(engine, tables=None, debug=False):
     model_json = result["cubesmodel_json"]
 
     # Write model
-    (tmpfile, model_path) = tempfile.mkstemp(suffix='.json', prefix='cubesext-model-')
-    os.write(tmpfile, model_json.encode("utf-8"))
-    os.close(tmpfile)
+    if model_path:
+        with open(model_path, "w") as tmpfile:
+            tmpfile.write(model_json)
+    else:
+        (tmpfile, model_path) = tempfile.mkstemp(suffix='.json', prefix='cubesext-model-')
+        os.write(tmpfile, model_json.encode("utf-8"))
+        os.close(tmpfile)
 
     #workspace = Workspace()
     #workspace.register_default_store("sql", url=connection.url)
