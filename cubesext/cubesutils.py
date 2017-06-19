@@ -18,6 +18,7 @@ if sys.version_info >= (3, 0):
 else:
     from ConfigParser import SafeConfigParser as ConfigParser
 
+
 def pandas2cubes(dataframe):
     """
     """
@@ -36,7 +37,7 @@ def pandas2cubes(dataframe):
 def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False):
 
     exclude_columns = ['key']
-    force_dimensions = dimensions
+    force_dimensions = dimensions if dimensions else []
 
     metadata = sqlalchemy.MetaData()
     metadata.reflect(engine)
@@ -198,20 +199,20 @@ def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False
                 # Create an alias to a datetime dimension
                 aliasdimension = olap.AliasDimension()
                 aliasdimension.dimension = factdimension
-                aliasdimension.id = "cubesutils.%s.dim.%s.%s" % (tablename, "datetime", slugify.slugify(dbcol.name, separator="_"))
-                aliasdimension.name = slugify.slugify(dbcol.name, separator="_").replace("_id", "")
-                aliasdimension.label = slugify.slugify(dbcol.name, separator="_").replace("_id", "")
+                aliasdimension.id = "cubesutils.%s.dim.%s.%s" % (slugify.slugify(dbtable.name, separator="_"), "datetime", slugify.slugify(dbcol.name, separator="_"))
+                aliasdimension.name = slugify.slugify(dbtable.name, separator="_") + "_" + slugify.slugify(dbcol.name, separator="_").replace("_id", "")
+                aliasdimension.label = slugify.slugify(dbtable.name, separator="_") + " " + slugify.slugify(dbcol.name, separator="_").replace("_id", "")
                 cubetl.container.add_component(aliasdimension)
 
                 fact.dimensions.append(aliasdimension)
 
                 mapper = olap.sql.EmbeddedDimensionMapper()
                 mapper.entity = aliasdimension
-                mapper.mappings = [{ 'name': 'year', 'column': 'year(%s)' % dbcol.name },
-                                   { 'name': 'quarter', 'column': 'quarter(%s)' % dbcol.name },
-                                   { 'name': 'month', 'column': 'month(%s)' % dbcol.name },
-                                   { 'name': 'week', 'column': 'week(%s)' % dbcol.name },
-                                   { 'name': 'day', 'column': 'day(%s)' % dbcol.name }]
+                mapper.mappings = [{ 'name': 'year', 'column': dbcol.name, 'extract': 'year' },
+                                   { 'name': 'quarter', 'column': dbcol.name, 'extract': 'quarter' },
+                                   { 'name': 'month', 'column': dbcol.name, 'extract': 'month' },
+                                   { 'name': 'week', 'column': dbcol.name, 'extract': 'week' },
+                                   { 'name': 'day', 'column': dbcol.name, 'extract': 'day' }]
                 #olapmapper.include.append(olapmappers[related_fact])
                 olapmapper.mappers.append(mapper)
 
