@@ -13,6 +13,8 @@ develop-eggs
 /lib
 /lib64
 
+/notebooks/generated
+
 .project
 .pydevproject
 .settings

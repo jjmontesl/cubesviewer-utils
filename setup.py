@@ -85,5 +85,5 @@ setup(
     package_data=get_package_data(package),
     install_requires=install_requires,
     classifiers=classifiers,
-    #entry_points={'console_scripts': ['codenamize=codenamize.codenamize:main']},
+    entry_points={'console_scripts': ['cubesext=cubesext.cli:main']},
 )

@@ -12,6 +12,15 @@ from cubes import server
 import slugify
 import os
 import sys
+import subprocess
+import signal
+import logging
+import time
+import argparse
+import http
+import socketserver
+import webbrowser
+from http.server import SimpleHTTPRequestHandler
 
 if sys.version_info >= (3, 0):
     from configparser import ConfigParser
@@ -19,11 +28,51 @@ else:
     from ConfigParser import SafeConfigParser as ConfigParser
 
 
+logger = logging.getLogger(__name__)
+
+
+SLICER_CONFIG = '''
+# Slicer OLAP server configuration
+
+[workspace]
+log_level: debug
+
+[server]
+host: localhost
+port: 5000
+reload: yes
+prettyprint: yes
+json_record_limit: %(json_record_limit)d
+allow_cors_origin: *
+processes: 6
+
+[store]
+type: sql
+url: %(db_url)s
+
+[models]
+main: %(model_path)s
+'''
+
+
+#! Holds the reference to the running cubes process
+cubes_process = None
+
+#! Reference to Jupyter previously written HTML
+cubesviewer_html = None
+
+#! Cubesviewer view count
+cubesviewer_index = 0
+
+
 def pandas2cubes(dataframe):
     """
-    """
-    # Load dataframe to in-memory sqlite
+    Loads a Pandas dataframe on a temporary SQLite database, and generates am
+    appropriate Cubes configuration.
 
+    This can be used to quickly examine a Pandas dataframe with CubesViewer.
+    See the "CubesViewer in Jupyter from Pandas dataframe Example".
+    """
     (tmpfile, db_path) = tempfile.mkstemp(suffix='.sqlite3', prefix='cubesext-db-')
     db_url = 'sqlite:///' + db_path
 
@@ -31,13 +80,16 @@ def pandas2cubes(dataframe):
     connection = engine.connect()
     dataframe.to_sql("pandacube", connection)
 
-    return sql2cubes(engine)
+    return sql2cubes(db_url)
 
 
-def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False):
+def sql2cubes(db_url, model_path=None, tables=None, dimensions=None, debug=False):
 
     exclude_columns = ['key']
     force_dimensions = dimensions if dimensions else []
+
+    engine = create_engine(db_url)
+    engine_connection = engine.connect()
 
     metadata = sqlalchemy.MetaData()
     metadata.reflect(engine)
@@ -47,13 +99,12 @@ def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False
     connection.url = engine.url
 
     # Create Cubetl context
-    bootstrap = Bootstrap()
-    ctx = bootstrap.init(debug=debug)
+    cubesbootstrap = Bootstrap()
+    ctx = cubesbootstrap.init(debug=debug)
     ctx.debug = True
 
     # Load yaml library definitions that are dependencies
     cubetlconfig.load_config(ctx, os.path.dirname(__file__) + "/cubetl-datetime.yaml")
-
 
     olapmappers = {}  # Indexed by table name
     factdimensions = {}  # Indexed by table_name
@@ -70,10 +121,10 @@ def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False
 
     for dbtable in metadata.sorted_tables:
 
-        if dbtable.name in ('sqlite_sequence'):
+        if dbtable.name.startswith('sqlite_'):
             continue
 
-        print("+ Table: %s" % dbtable.name)
+        print("Table: %s" % dbtable.name)
 
         tablename = slugify.slugify(dbtable.name, separator="_")
 
@@ -100,7 +151,7 @@ def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False
             if dbcol.name in exclude_columns:
                 continue
 
-            print("+-- Column: %s [type=%s, null=%s, pk=%s, fk=%s]" % (dbcol.name, dbcol.type, dbcol.nullable, dbcol.primary_key, dbcol.foreign_keys))
+            print("  Column: %s [type=%s, null=%s, pk=%s, fk=%s]" % (dbcol.name, dbcol.type, dbcol.nullable, dbcol.primary_key, dbcol.foreign_keys))
 
             if dbcol.primary_key:
                 if (str(dbcol.type) == "INTEGER"):
@@ -143,15 +194,18 @@ def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False
                 aliasdimension = olap.AliasDimension()
                 aliasdimension.dimension = factdimension
                 aliasdimension.id = "cubesutils.%s.dim.%s.%s" % (tablename, slugify.slugify(related_fact, separator="_"), slugify.slugify(dbcol.name, separator="_"))
-                aliasdimension.name = slugify.slugify(dbcol.name, separator="_").replace("_id", "")
-                aliasdimension.label = slugify.slugify(dbcol.name, separator="_").replace("_id", "")
+                #aliasdimension.name = slugify.slugify(dbcol.name, separator="_").replace("_id", "")
+                #aliasdimension.label = slugify.slugify(dbcol.name, separator="_").replace("_id", "")
+                aliasdimension.name = tablename + "_" + related_fact + "_" + slugify.slugify(dbcol.name, separator="_").replace("_id", "")
+                aliasdimension.label = tablename + " " + related_fact + " " + slugify.slugify(dbcol.name, separator="_").replace("_id", "")
                 cubetl.container.add_component(aliasdimension)
 
                 fact.dimensions.append(aliasdimension)
 
                 mapper = olap.sql.FactDimensionMapper()
                 mapper.entity = aliasdimension
-                mapper.mappings = [{ 'name': slugify.slugify(dbcol.name, separator="_").replace("_id", ""),
+                mapper.mappings = [{ #'name': slugify.slugify(dbcol.name, separator="_").replace("_id", ""),
+                                     'name': tablename + "_" + related_fact + "_" + slugify.slugify(dbcol.name, separator="_").replace("_id", ""),
                                      'column': dbcol.name,
                                      'pk': True
                                   }]
@@ -169,7 +223,7 @@ def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False
                     "pk": True,
                     "name": slugify.slugify(dbtable.name, separator="_") + "_" + slugify.slugify(dbcol.name, separator="_"),
                     "type": coltype(dbcol)
-                    }]
+                }]
 
                 cubetl.container.add_component(dimension)
                 fact.dimensions.append(dimension)
@@ -192,6 +246,11 @@ def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False
                 }
                 fact.measures.append(measure)
 
+                # Also add dimension if integer, but not too many
+                if str(dbcol.type) in ("INTEGER"):
+                    # TODO
+                    pass
+
             elif str(dbcol.type) in ("DATETIME"):
 
                 factdimension = cubetl.container.get_component_by_id("cubetl.datetime.date")
@@ -208,11 +267,11 @@ def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False
 
                 mapper = olap.sql.EmbeddedDimensionMapper()
                 mapper.entity = aliasdimension
-                mapper.mappings = [{ 'name': 'year', 'column': dbcol.name, 'extract': 'year' },
-                                   { 'name': 'quarter', 'column': dbcol.name, 'extract': 'quarter' },
-                                   { 'name': 'month', 'column': dbcol.name, 'extract': 'month' },
-                                   { 'name': 'week', 'column': dbcol.name, 'extract': 'week' },
-                                   { 'name': 'day', 'column': dbcol.name, 'extract': 'day' }]
+                mapper.mappings = [{'name': 'year', 'column': dbcol.name, 'extract': 'year'},
+                                   {'name': 'quarter', 'column': dbcol.name, 'extract': 'quarter'},
+                                   {'name': 'month', 'column': dbcol.name, 'extract': 'month'},
+                                   {'name': 'week', 'column': dbcol.name, 'extract': 'week'},
+                                   {'name': 'day', 'column': dbcol.name, 'extract': 'day'}]
                 #olapmapper.include.append(olapmappers[related_fact])
                 olapmapper.mappers.append(mapper)
 
@@ -255,7 +314,7 @@ def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False
 
     # Launch process
     ctx.start_node = "cubesutils.export-cubes"
-    result = bootstrap.run(ctx)
+    result = cubesbootstrap.run(ctx)
     model_json = result["cubesmodel_json"]
 
     # Write model
@@ -273,14 +332,47 @@ def sql2cubes(engine, model_path=None, tables=None, dimensions=None, debug=False
     # Load model
     #workspace.import_model("model.json")
 
-    return (engine.url, model_path)
+    #for fact in facts:
+    #    print("  %s" % fact)
 
+    return (model_path)
 
 
 def cubes_serve(db_url, model_path, host="localhost", port=5000, allow_cors_origin="*", debug=False, json_record_limit=5000):
     """
     """
 
+    global cubes_process
+
+    if cubes_process:
+        logger.info("Killing cubes process: %s" % cubes_process.pid)
+        os.killpg(os.getpgid(cubes_process.pid), signal.SIGTERM)
+        time.sleep(2.0)
+    else:
+        #def kernel_restart():
+        #    os.killpg(os.getpgid(cubes_process.pid), signal.SIGTERM)
+        #kernelmanager = KernelManager
+        #kernelmanager.add_restart_callback(kernel_restart, event='restart')
+        pass
+
+    tmpdesc, tmpfile = tempfile.mkstemp(".ini", "cubes-slicer-")
+
+    config = SLICER_CONFIG % {'db_url': db_url,
+                              'model_path': model_path,
+                              'json_record_limit': json_record_limit}
+    with open(tmpfile, "w") as f:
+        f.write(config)
+    f.close()
+
+    logger.info("Launching cubes slicer: %s" % tmpfile)
+    command = "slicer serve %s" % (tmpfile, )
+    # call: https://stackoverflow.com/questions/2760652/how-to-kill-or-avoid-zombie-processes-with-subprocess-module
+    cubes_process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, preexec_fn=os.setsid)
+    logger.info("Launched server process: %s" % (cubes_process.pid))
+    #process.wait()
+    #process.returncode
+
+    """
     config = ConfigParser()
 
     # When adding sections or items, add them in the reverse order of
@@ -307,23 +399,45 @@ def cubes_serve(db_url, model_path, host="localhost", port=5000, allow_cors_orig
     config.set('models', 'main', model_path)
 
     server.run_server(config, debug=debug)
-
-
-def cubesviewer_serve(host="localhost", port="8085"):
-    """
     """
 
-    # Launch server on workspace
-
-    # Serve studio on localhostand open browser?
-    pass
+    return cubes_process
 
 
-def cubesviewer_jupyter():
+def cubesviewer_serve(cubes_url=None, cubesviewer_host="localhost", cubesviewer_port=8085, open_browser=True):
+    """
+    """
+    # Serve studio via SimpleHTTPServer
+    static_dir = os.path.join(os.path.dirname(__file__), "static")
+    handler = SimpleHTTPRequestHandler
+
+    # Open browser if appropriate
+    url = "http://localhost:%d/studio.html?cubes_url=%s" % (cubesviewer_port, cubes_url)
+    webbrowser.open(url)
+
+    os.chdir(static_dir)
+    httpd = socketserver.TCPServer(("", cubesviewer_port), SimpleHTTPRequestHandler)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt as e:
+        raise
+
+
+def cubesviewer_jupyter(cube, cubes_host="localhost", cubes_port="5000", view=None):
 
     # JUPYTER INTEGRATION
 
     from IPython.display import display, HTML
+
+    global cubesviewer_html
+    global cubesviewer_index
+
+    cubesviewer_html = None
+    cubesviewer_index += 1
+
+    serialized_view = view
+    if not serialized_view:
+        serialized_view = '''{"mode":"explore", "cubename":"{{ CUBE }}", "name": "Sample View"}'''
 
     html = """
 
@@ -346,7 +460,13 @@ def cubesviewer_jupyter():
         <script src="{{ STATIC_URL }}lib/nvd3/nv.d3.js"></script>
         <!--<script src="{{ STATIC_URL }}lib/flotr2/flotr2.min.js"></script>-->
 
-        <div id="cv_embedded_01"><i>CubesViewer View</i></div>
+        <style>
+        .rendered_html ul:not(.list-inline), .rendered_html ol:not(.list-inline) {
+            padding-left: 0px !important;
+        }
+        </style>
+
+        <div id="cv_embedded_{{ CUBESVIEWER_INDEX }}"><i>CubesViewer View</i></div>
 
         <script type="text/javascript">
 
@@ -354,32 +474,44 @@ def cubesviewer_jupyter():
           var view1 = null;
 
           // Initialize CubesViewer when document is ready
-          $(document).ready(function() {
+          //$(document).ready(function() {
+          setTimeout(function() {
 
               console.debug("Initializing CubesViewer cell in Jupyter Notebook.");
 
               var cubesUrl = "http://localhost:5000";
 
-              // Initialize CubesViewer system
-              cubesviewer.init({
-                  cubesUrl: cubesUrl
-              });
+              if (! ('_cubesutils_initialized' in document)) {
+
+                  // Initialize CubesViewer system
+                  cubesviewer.init({
+                      cubesUrl: cubesUrl
+                  });
+
+                  document._cubesutils_initialized = true;
+              }
+
 
               // Add views
               cubesviewer.apply(function() {
-                  //view1 = cubesviewer.createView('#cv_embedded_01', "cube", serializedViewOrObject);
-                  var serializedView = {"mode":"summary", "cubename":"estat_earn_ses", "name": "Sample View"};
+                  //view1 = cubesviewer.createView('#cv_embedded_{{ CUBESVIEWER_INDEX }}', "cube", serializedViewOrObject);
+                  var serializedView = {{ SERIALIZED_VIEW }};
 
-                  view1 = cubesviewer.createView('#cv_embedded_01', "pandacube", serializedView);
+                  view1 = cubesviewer.createView('#cv_embedded_{{ CUBESVIEWER_INDEX }}', "cubesutilscube{{ CUBESVIEWER_INDEX }}", serializedView);
               });
 
-          });
+          //});
+          }, 3000);
 
         </script>
     """
 
+    html = html.replace("{{ SERIALIZED_VIEW }}", serialized_view)
     html = html.replace("{{ STATIC_URL }}", "/nbextensions/cubesext/static/")
+    html = html.replace("{{ CUBE }}", cube)
+    html = html.replace("{{ CUBESVIEWER_INDEX }}", str(cubesviewer_index))
+
+    cubesviewer_html = html
 
     display(HTML(html))
-
 

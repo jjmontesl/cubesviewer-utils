@@ -1,0 +1,5 @@
+[HEAD]
+
+  - Added Cubes support for Pandas.
+  - Added SQL databases introspection support.
+  - Added CubesViewer support for Jupyter Notebooks.

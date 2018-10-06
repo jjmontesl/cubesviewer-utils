@@ -1,5 +1,6 @@
 
-from .cubesutils import pandas2cubes, sql2cubes, cubesviewer_jupyter, cubes_serve
+from .cubesutils import pandas2cubes, sql2cubes, cubes_serve, cubesviewer_serve, cubesviewer_jupyter  # django2cubes
+
 
 __author__ = 'Jose Juan Montes [@jjmontesl]'
 __description__ = 'Integration of Cubes and CubesViewer with Pandas, Jupyter Notebook and Django.'
@@ -17,7 +18,7 @@ def load_jupyter_server_extension(nbapp):
     nbapp.log.info("CubesViewer notebook module enabled.")
 """
 
-
+'''
 # Jupyter Extension points
 def _jupyter_nbextension_paths():
     return [dict(
@@ -29,7 +30,7 @@ def _jupyter_nbextension_paths():
         # _also_ in the `nbextension/` namespace
         #require="cubesext/main"
         )]
-
+'''
 
 
 

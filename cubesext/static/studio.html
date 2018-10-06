@@ -1,0 +1,112 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml" lang="en-us" xml:lang="en-us" >
+<head>
+
+    <title>CubesViewer Studio (Local)</title>
+    <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <link rel="icon" type="image/png" href="img/favicon/favicon-32x32.png" sizes="32x32">
+    <link rel="icon" type="image/png" href="img/favicon/favicon-194x194.png" sizes="194x194">
+    <link rel="icon" type="image/png" href="img/favicon/favicon-96x96.png" sizes="96x96">
+    <link rel="shortcut icon" href="img/favicon/favicon.ico">
+
+
+    <link rel="stylesheet" href="lib/angular-ui-grid/ui-grid.css" />
+    <link rel="stylesheet" href="lib/font-awesome/css/font-awesome.css" />
+    <link rel="stylesheet" href="lib/nvd3/nv.d3.css" />
+    <link rel="stylesheet" href="lib/cubesviewer/cubesviewer.css" />
+    <link rel="stylesheet" href="lib/bootstrap-submenu/css/bootstrap-submenu.css" /> <!-- after cubesviewer.css! -->
+
+    <link rel="stylesheet" href="cvapp.css" />
+
+    <script src="lib/jquery/jquery.js"></script>
+    <script src="lib/bootstrap/bootstrap.js"></script>
+    <script src="lib/bootstrap-submenu/js/bootstrap-submenu.js"></script>
+    <script src="lib/angular/angular.js"></script>
+    <script src="lib/angular-cookies/angular-cookies.js"></script>
+    <script src="lib/angular-bootstrap/ui-bootstrap-tpls.js"></script>
+    <script src="lib/angular-ui-grid/ui-grid.js"></script>
+    <script src="lib/d3/d3.js"></script>
+    <script src="lib/nvd3/nv.d3.js"></script>
+    <script src="lib/flotr2/flotr2.min.js"></script>
+    <script src="lib/masonry/masonry.pkgd.min.js"></script>  <!-- needed for CubesViewer Studio only, not embedded views -->
+    <script src="lib/cubesviewer/cubesviewer.js"></script>
+
+</head>
+
+<body>
+
+<script type="text/javascript">
+
+    function getUrlParameter(sParam) {
+        var sPageURL = decodeURIComponent(window.location.search.substring(1)),
+            sURLVariables = sPageURL.split('&'),
+            sParameterName,
+            i;
+
+        for (i = 0; i < sURLVariables.length; i++) {
+            sParameterName = sURLVariables[i].split('=');
+
+            if (sParameterName[0] === sParam) {
+                return sParameterName[1] === undefined ? true : sParameterName[1];
+            }
+        }
+    };
+
+    // Initialize CubesViewer when document is ready
+    $(document).ready(function() {
+
+        var cubesUrl = getUrlParameter("cubes_url");
+        if (!cubesUrl) {
+            cubesUrl = prompt ("Enter your Cubes Server URL\n(or try http://cubesdemo.cubesviewer.com)", "http://localhost:5000");
+        }
+        //var cubesUrl = "http://localhost:5000";
+
+        cubesviewerStudio.init({
+        	cubesUrl: cubesUrl,
+            container: $('#cubesviewer').get(0),
+            debug: true
+        });
+
+    });
+
+</script>
+
+<div>
+
+    <div class="header">
+        <div style="float: left;">
+            <img class="cv-logo" title="CubesViewer" src="img/cubesviewer-logo.png" />
+        </div>
+
+        <h1>CubesViewer Studio</h1>
+        <small>Local HTML version (<a href="https://github.com/jjmontesl/cubesviewer-server" target="_blank">server-side features</a> are not available)</small>
+
+    </div>
+
+    <div style="clear: both;"></div>
+
+
+    <!-- Cubes Viewer container -->
+    <div id="cubesviewer">
+    </div>
+
+
+    <div class="footer" style="clear: both; padding-top: 20px;">
+    	<div style="height: 1px; border-top: 1px solid #DDDDDD; padding-top: 4px;"></div>
+    	<div style="float: right; white-space: nowrap;">
+    		<p style="vertical-align: middle; margin: 2px;">
+    		<a href="http://databrewery.org/" target="_blank"><img title="Powered by Databrewery Cubes" style="width: 70px; height: 25px;" src="img/cubes-logo.png" /></a>
+            <a href="https://github.com/jjmontesl/cubesviewer" target="_blank"><img title="Powered by CubesViewer" style="width: 50px; height: 25px;" src="img/cubesviewer-logo.png" /></a>
+    		</p>
+    	</div>
+    	<div>
+    		<p><a href="https://github.com/jjmontesl/cubesviewer" target="_blank">CubesViewer</a> <span class="cv-version"></span> - Cubes OLAP explorer</p>
+    	</div>
+    </div>
+
+</div>
+
+</body>
+</html>
